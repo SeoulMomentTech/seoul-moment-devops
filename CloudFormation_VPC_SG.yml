@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Secure VPC Infrastructure for Taipei Region - Fixed Circular Dependency'
+Description: 'Secure VPC Infrastructure for Taipei Region - Fixed Circular Dependency with Full Exports'
 
 Parameters:
   ProjectName:
@@ -386,10 +386,36 @@ Outputs:
   VPCId:
     Value: !Ref VPC
     Export: { Name: !Sub '${ProjectName}-VPC-ID' }
+  PublicSubnet1ID:
+    Value: !Ref PublicSubnet1
+    Export: { Name: !Sub '${ProjectName}-PublicSubnet1-ID' }
+  PublicSubnet2ID:
+    Value: !Ref PublicSubnet2
+    Export: { Name: !Sub '${ProjectName}-PublicSubnet2-ID' }
+  PrivateSubnet1ID:
+    Value: !Ref PrivateSubnet1
+    Export: { Name: !Sub '${ProjectName}-PrivateSubnet1-ID' }
+  PrivateSubnet2ID:
+    Value: !Ref PrivateSubnet2
+    Export: { Name: !Sub '${ProjectName}-PrivateSubnet2-ID' }
   ALBSGID:
     Value: !Ref ALBSecurityGroup
     Export: { Name: !Sub '${ProjectName}-ALBSG-ID' }
   WebServerSGID:
     Value: !Ref WebServerSecurityGroup
     Export: { Name: !Sub '${ProjectName}-WebServerSG-ID' }
-  # (이하 필요한 Output 추가 가능)
+  ECSSGID:
+    Value: !Ref ECSSecurityGroup
+    Export: { Name: !Sub '${ProjectName}-ECSSG-ID' }
+  DatabaseSGID:
+    Value: !Ref DatabaseSecurityGroup
+    Export: { Name: !Sub '${ProjectName}-DatabaseSG-ID' }
+  CacheSGID:
+    Value: !Ref CacheSecurityGroup
+    Export: { Name: !Sub '${ProjectName}-CacheSG-ID' }
+  BastionSGID:
+    Value: !Ref BastionSecurityGroup
+    Export: { Name: !Sub '${ProjectName}-BastionSG-ID' }
+  ECSTemplateSGID:
+    Value: !Ref ECSTemplateSecurityGroup
+    Export: { Name: !Sub '${ProjectName}-ECSTemplateSG-ID' }
