@@ -1,21 +1,26 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Production-ready ECR and RDS Infrastructure for Taipei Region'
+Description: 'Production-ready ECR and RDS Infrastructure - Cost Optimized (Single-AZ)'
 
 Parameters:
   ProjectName:
     Type: String
     Default: 'seoul-moment'
-    Description: 'Project name prefix'
+    Description: '이전에 만든 네트워크 스택의 ProjectName과 동일해야 합니다.'
 
 Resources:
-  # ========== 1. ECR REPOSITORIES (운영용: 태그 불변성 추가) ==========
-  
+  # ========== 1. CloudWatch 로그 그룹 (비용 절감: 3일 보관) ==========
+  RDSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/rds/instance/${ProjectName}-db-prod/postgresql'
+      RetentionInDays: 3
+
+  # ========== 2. ECR REPOSITORIES (이미지 창고) ==========
   ECRRepositoryAPI:
     Type: AWS::ECR::Repository
     Properties:
       RepositoryName: !Sub '${ProjectName}-api'
-      # 운영 환경에서는 배포된 이미지 버전이 바뀌지 않도록 IMMUTABLE 권장
-      ImageTagMutability: IMMUTABLE 
+      ImageTagMutability: IMMUTABLE
       ImageScanningConfiguration:
         ScanOnPush: true
       EncryptionConfiguration:
@@ -26,32 +31,40 @@ Resources:
             "rules": [
               {
                 "rulePriority": 1,
-                "description": "Keep only 10 latest images for production safety",
+                "description": "최근 5개 이미지만 남기고 삭제",
                 "selection": {
                   "tagStatus": "any",
                   "countType": "imageCountMoreThan",
-                  "countNumber": 10
+                  "countNumber": 5
                 },
                 "action": { "type": "expire" }
               }
             ]
           }
 
-  # ========== 2. SECRETS MANAGER (보안 강화) ==========
-  
+  # ========== 3. SECRETS MANAGER (DB 비밀번호 금고) ==========
   DBSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Sub '${ProjectName}/rds/credentials-prod'
       Description: !Sub 'Production RDS credentials for ${ProjectName}'
       GenerateSecretString:
-        SecretStringTemplate: '{"username": "dbadmin"}'
+        # 🌟 username을 seoul로 변경했습니다!
+        SecretStringTemplate: '{"username": "seoul"}'
         GenerateStringKey: "password"
         PasswordLength: 16
         ExcludeCharacters: '"@/\'
 
-  # ========== 3. RDS CONFIGURATION (운영 최적화) ==========
-  
+  # ========== 4. RDS CONFIGURATION ==========
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: 'Cost-optimized parameters'
+      Family: postgres13
+      Parameters:
+        log_statement: 'ddl'
+        log_min_duration_statement: '2000'
+
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
@@ -60,41 +73,33 @@ Resources:
         - !ImportValue { "Fn::Sub": "${ProjectName}-PrivateSubnet1-ID" }
         - !ImportValue { "Fn::Sub": "${ProjectName}-PrivateSubnet2-ID" }
 
-  DBParameterGroup:
-    Type: AWS::RDS::DBParameterGroup
-    Properties:
-      Description: 'Production PostgreSQL 13 parameters'
-      Family: postgres13
-      Parameters:
-        log_statement: 'ddl' # 운영 환경은 성능을 위해 DDL 위주 로깅 권장
-        log_min_duration_statement: '2000' # 2초 이상 느린 쿼리 감지
-
   RDSInstance:
     Type: AWS::RDS::DBInstance
-    DeletionPolicy: Retain # 스택 삭제 시에도 DB 인스턴스는 유지 (최후의 보루)
+    DeletionPolicy: Retain
     Properties:
       DBInstanceIdentifier: !Sub '${ProjectName}-db-prod'
+      DBName: 'seoul_moment'
       Engine: postgres
       EngineVersion: '13.20'
-      DBInstanceClass: db.t4g.small # 운영 환경이므로 최소 small 이상 권장
-      AllocatedStorage: 100 # 운영 데이터량을 고려해 넉넉히 시작
-      MaxAllocatedStorage: 500
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: 20
+      MaxAllocatedStorage: 100
       StorageType: gp3
       StorageEncrypted: true
+      MultiAZ: false
+      DeletionProtection: true
+      PubliclyAccessible: false
+      EnableCloudwatchLogsExports:
+        - 'postgresql'
       VPCSecurityGroups:
         - !ImportValue { "Fn::Sub": "${ProjectName}-DatabaseSG-ID" }
       DBSubnetGroupName: !Ref DBSubnetGroup
-      PubliclyAccessible: false
-      # 운영 환경 핵심 설정
-      MultiAZ: true # 고가용성 보장
-      DeletionProtection: true # 삭제 보호 활성화
+      DBParameterGroupName: !Ref DBParameterGroup
       MasterUsername: !Join [ "", [ "{{resolve:secretsmanager:", !Ref DBSecret, ":SecretString:username}}" ] ]
       MasterUserPassword: !Join [ "", [ "{{resolve:secretsmanager:", !Ref DBSecret, ":SecretString:password}}" ] ]
+      BackupRetentionPeriod: 7
       MonitoringInterval: 60
       MonitoringRoleArn: !GetAtt RDSEnhancedMonitoringRole.Arn
-      EnablePerformanceInsights: true
-      DBParameterGroupName: !Ref DBParameterGroup
-      BackupRetentionPeriod: 30 # 운영 데이터는 30일 보관 권장
 
   RDSEnhancedMonitoringRole:
     Type: AWS::IAM::Role
@@ -103,15 +108,20 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal:
-              Service: monitoring.rds.amazonaws.com
+            Principal: { Service: monitoring.rds.amazonaws.com }
             Action: 'sts:AssumeRole'
       ManagedPolicyArns:
         - 'arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole'
 
 Outputs:
   RDSEndpoint:
-    Description: 'Production RDS Endpoint'
+    Description: 'RDS Connection Endpoint'
     Value: !GetAtt RDSInstance.Endpoint.Address
     Export:
-      Name: !Sub '${ProjectName}-Prod-RDS-Endpoint'
+      Name: !Sub '${ProjectName}-RDS-Endpoint'
+
+  ECRRepoAPI:
+    Description: 'ECR API Repository URI'
+    Value: !GetAtt ECRRepositoryAPI.RepositoryUri
+    Export:
+      Name: !Sub '${ProjectName}-ECR-API-URI'
