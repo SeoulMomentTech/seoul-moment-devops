@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Production-ready ECR and RDS Infrastructure for Taipei Region'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'seoul-moment'
+    Description: 'Project name prefix'
+
+Resources:
+  # ========== 1. ECR REPOSITORIES (운영용: 태그 불변성 추가) ==========
+  
+  ECRRepositoryAPI:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}-api'
+      # 운영 환경에서는 배포된 이미지 버전이 바뀌지 않도록 IMMUTABLE 권장
+      ImageTagMutability: IMMUTABLE 
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep only 10 latest images for production safety",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  # ========== 2. SECRETS MANAGER (보안 강화) ==========
+  
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ProjectName}/rds/credentials-prod'
+      Description: !Sub 'Production RDS credentials for ${ProjectName}'
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "dbadmin"}'
+        GenerateStringKey: "password"
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'
+
+  # ========== 3. RDS CONFIGURATION (운영 최적화) ==========
+  
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: 'Production DB Subnet Group'
+      SubnetIds:
+        - !ImportValue { "Fn::Sub": "${ProjectName}-PrivateSubnet1-ID" }
+        - !ImportValue { "Fn::Sub": "${ProjectName}-PrivateSubnet2-ID" }
+
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: 'Production PostgreSQL 13 parameters'
+      Family: postgres13
+      Parameters:
+        log_statement: 'ddl' # 운영 환경은 성능을 위해 DDL 위주 로깅 권장
+        log_min_duration_statement: '2000' # 2초 이상 느린 쿼리 감지
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Retain # 스택 삭제 시에도 DB 인스턴스는 유지 (최후의 보루)
+    Properties:
+      DBInstanceIdentifier: !Sub '${ProjectName}-db-prod'
+      Engine: postgres
+      EngineVersion: '13.20'
+      DBInstanceClass: db.t4g.small # 운영 환경이므로 최소 small 이상 권장
+      AllocatedStorage: 100 # 운영 데이터량을 고려해 넉넉히 시작
+      MaxAllocatedStorage: 500
+      StorageType: gp3
+      StorageEncrypted: true
+      VPCSecurityGroups:
+        - !ImportValue { "Fn::Sub": "${ProjectName}-DatabaseSG-ID" }
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: false
+      # 운영 환경 핵심 설정
+      MultiAZ: true # 고가용성 보장
+      DeletionProtection: true # 삭제 보호 활성화
+      MasterUsername: !Join [ "", [ "{{resolve:secretsmanager:", !Ref DBSecret, ":SecretString:username}}" ] ]
+      MasterUserPassword: !Join [ "", [ "{{resolve:secretsmanager:", !Ref DBSecret, ":SecretString:password}}" ] ]
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RDSEnhancedMonitoringRole.Arn
+      EnablePerformanceInsights: true
+      DBParameterGroupName: !Ref DBParameterGroup
+      BackupRetentionPeriod: 30 # 운영 데이터는 30일 보관 권장
+
+  RDSEnhancedMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole'
+
+Outputs:
+  RDSEndpoint:
+    Description: 'Production RDS Endpoint'
+    Value: !GetAtt RDSInstance.Endpoint.Address
+    Export:
+      Name: !Sub '${ProjectName}-Prod-RDS-Endpoint'
