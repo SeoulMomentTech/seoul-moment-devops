@@ -46,7 +46,7 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       Name: !Sub '${ProjectName}-api-tg'
-      Port: 3000
+      Port: 80
       Protocol: 'HTTP'
       ProtocolVersion: 'HTTP1'
       VpcId: !ImportValue { "Fn::Sub": "${ProjectName}-VPC-ID" }
