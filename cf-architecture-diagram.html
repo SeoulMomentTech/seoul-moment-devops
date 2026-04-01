@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CloudFormation Architecture Diagram</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f5f7fa; color: #333; padding: 2rem; }
+        h1 { text-align: center; margin-bottom: 0.5rem; color: #1a1a2e; }
+        .subtitle { text-align: center; color: #666; margin-bottom: 2rem; font-size: 0.9rem; }
+        .diagram-container { background: #fff; border-radius: 12px; padding: 2rem; box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin-bottom: 2rem; overflow-x: auto; }
+        .mermaid { text-align: center; }
+        h2 { margin: 1.5rem 0 1rem; color: #1a1a2e; border-bottom: 2px solid #e0e0e0; padding-bottom: 0.5rem; }
+        table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 6px rgba(0,0,0,0.06); margin-bottom: 1.5rem; }
+        th { background: #2c3e50; color: #fff; padding: 0.75rem 1rem; text-align: left; font-weight: 500; }
+        td { padding: 0.6rem 1rem; border-bottom: 1px solid #eee; }
+        tr:hover td { background: #f8f9fa; }
+        .legend { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1.5rem 0; }
+        .legend-item { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }
+        .legend-color { width: 16px; height: 16px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>AWS Architecture Diagram</h1>
+    <p class="subtitle">VPC 10.1.0.0/16 &mdash; Auto-generated from CloudFormation templates</p>
+
+    <div class="legend">
+        <div class="legend-item"><div class="legend-color" style="background:#FF9900"></div> ALB / Web / ECS</div>
+        <div class="legend-item"><div class="legend-color" style="background:#3F1D7B"></div> Bastion</div>
+        <div class="legend-item"><div class="legend-color" style="background:#2E7D32"></div> Database</div>
+        <div class="legend-item"><div class="legend-color" style="background:#C62828"></div> Cache</div>
+        <div class="legend-item"><div class="legend-color" style="background:#4A90D9"></div> Internet</div>
+    </div>
+
+    <div class="diagram-container">
+        <pre class="mermaid">
+flowchart LR
+    Internet(("☁️ Internet"))
+
+    subgraph VPC["VPC (10.1.0.0/16)"]
+        direction LR
+        ALBSecurityGroup["SG-ALB"]
+        WebServerSecurityGroup["SG-WEB-SERVER"]
+        ECSSecurityGroup["SG-ECS"]
+        DatabaseSecurityGroup["SG-DATABASE"]
+        CacheSecurityGroup["SG-CACHE"]
+        BastionSecurityGroup["SG-BASTION"]
+        ECSTemplateSecurityGroup["ecs-template-sg"]
+    end
+
+    Internet -->|"TCP/80, TCP/443"| ALBSecurityGroup
+    Internet -->|"TCP/22"| BastionSecurityGroup
+
+    DefaultSecurityGroup -->|"ALL"| DefaultSecurityGroup
+    ALBSecurityGroup -->|"TCP/3000"| WebServerSecurityGroup
+    BastionSecurityGroup -->|"TCP/22"| WebServerSecurityGroup
+    ALBSecurityGroup -->|"TCP/3000"| ECSSecurityGroup
+    BastionSecurityGroup -->|"TCP/22"| ECSSecurityGroup
+    WebServerSecurityGroup -->|"TCP/5432"| DatabaseSecurityGroup
+    ECSSecurityGroup -->|"TCP/5432"| DatabaseSecurityGroup
+    BastionSecurityGroup -->|"TCP/5432"| DatabaseSecurityGroup
+    WebServerSecurityGroup -->|"TCP/6379"| CacheSecurityGroup
+    ECSSecurityGroup -->|"TCP/6379"| CacheSecurityGroup
+    BastionSecurityGroup -->|"TCP/6379"| CacheSecurityGroup
+    ALBSecurityGroup -->|"TCP/80"| ECSTemplateSecurityGroup
+    style ALBSecurityGroup fill:#FF9900,stroke:#333,color:#fff
+    style WebServerSecurityGroup fill:#FF9900,stroke:#333,color:#fff
+    style ECSSecurityGroup fill:#FF9900,stroke:#333,color:#fff
+    style DatabaseSecurityGroup fill:#2E7D32,stroke:#333,color:#fff
+    style CacheSecurityGroup fill:#C62828,stroke:#333,color:#fff
+    style BastionSecurityGroup fill:#3F1D7B,stroke:#333,color:#fff
+    style ECSTemplateSecurityGroup fill:#FF9900,stroke:#333,color:#fff
+    style Internet fill:#4A90D9,stroke:#333,color:#fff
+        </pre>
+    </div>
+
+    
+    <h2>Subnets</h2>
+    <table>
+        <thead><tr><th>Name</th><th>CIDR</th><th>Type</th></tr></thead>
+        <tbody><tr><td>🌐 ${ProjectName}-pub-1a</td><td>10.1.0.0/20</td><td>Public</td></tr>
+<tr><td>🌐 ${ProjectName}-pub-1b</td><td>10.1.16.0/20</td><td>Public</td></tr>
+<tr><td>🔒 ${ProjectName}-pri-1a</td><td>10.1.128.0/20</td><td>Private</td></tr>
+<tr><td>🔒 ${ProjectName}-pri-1b</td><td>10.1.144.0/20</td><td>Private</td></tr>
+</tbody>
+    </table>
+    
+    
+    <h2>Security Group Rules</h2>
+    <table>
+        <thead><tr><th>Source</th><th>Destination</th><th>Port</th><th>Direction</th></tr></thead>
+        <tbody><tr><td>default-restricted</td><td>default-restricted</td><td></td><td>Ingress</td></tr>
+<tr><td>0.0.0.0/0</td><td>SG-ALB</td><td>80</td><td>Ingress</td></tr>
+<tr><td>0.0.0.0/0</td><td>SG-ALB</td><td>443</td><td>Ingress</td></tr>
+<tr><td>SG-ALB</td><td>SG-WEB-SERVER</td><td>3000</td><td>Ingress</td></tr>
+<tr><td>SG-BASTION</td><td>SG-WEB-SERVER</td><td>22</td><td>Ingress</td></tr>
+<tr><td>SG-ALB</td><td>SG-ECS</td><td>3000</td><td>Ingress</td></tr>
+<tr><td>SG-BASTION</td><td>SG-ECS</td><td>22</td><td>Ingress</td></tr>
+<tr><td>SG-WEB-SERVER</td><td>SG-DATABASE</td><td>5432</td><td>Ingress</td></tr>
+<tr><td>SG-ECS</td><td>SG-DATABASE</td><td>5432</td><td>Ingress</td></tr>
+<tr><td>SG-BASTION</td><td>SG-DATABASE</td><td>5432</td><td>Ingress</td></tr>
+<tr><td>SG-WEB-SERVER</td><td>SG-CACHE</td><td>6379</td><td>Ingress</td></tr>
+<tr><td>SG-ECS</td><td>SG-CACHE</td><td>6379</td><td>Ingress</td></tr>
+<tr><td>SG-BASTION</td><td>SG-CACHE</td><td>6379</td><td>Ingress</td></tr>
+<tr><td>0.0.0.0/0</td><td>SG-BASTION</td><td>22</td><td>Ingress</td></tr>
+<tr><td>SG-ALB</td><td>ecs-template-sg</td><td>80</td><td>Ingress</td></tr>
+</tbody>
+    </table>
+    
+    
+    <h2>Resources</h2>
+    <table>
+        <thead><tr><th>Logical ID</th><th>Type</th><th>Template</th></tr></thead>
+        <tbody><tr><td>BastionInstance</td><td>EC2 Instance</td><td>CloudFormation_Bastion.yml</td></tr>
+<tr><td>ElastiCacheReplicationGroup</td><td>ElastiCache (Redis)</td><td>CloudFormation_CACHE.yml</td></tr>
+<tr><td>ECRRepositoryAPI</td><td>ECR Repository</td><td>CloudFormation_ECR_RDS.yml</td></tr>
+<tr><td>RDSInstance</td><td>RDS (PostgreSQL)</td><td>CloudFormation_ECR_RDS.yml</td></tr>
+</tbody>
+    </table>
+    
+
+    <script>
+        mermaid.initialize({ startOnLoad: true, theme: 'default', flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis' } });
+    </script>
+</body>
+</html>

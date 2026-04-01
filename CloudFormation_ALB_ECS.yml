@@ -1,0 +1,363 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ALB, ECS Cluster, Task Definitions, and Services - Seoul Moment (Stack #5)'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'seoul-moment'
+    Description: '이전 스택들의 ProjectName과 동일해야 합니다'
+
+  APIDesiredCount:
+    Type: Number
+    Default: 0
+    Description: 'API 서비스 희망 태스크 수 (초기 배포 시 0, GitHub Actions 배포 후 1 이상)'
+
+Resources:
+  # ========== APPLICATION LOAD BALANCER ==========
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-alb'
+      Type: 'application'
+      Scheme: 'internet-facing'
+      IpAddressType: 'ipv4'
+      Subnets:
+        - !ImportValue { "Fn::Sub": "${ProjectName}-PublicSubnet1-ID" }
+        - !ImportValue { "Fn::Sub": "${ProjectName}-PublicSubnet2-ID" }
+      SecurityGroups:
+        - !ImportValue { "Fn::Sub": "${ProjectName}-ALBSG-ID" }
+      LoadBalancerAttributes:
+        - Key: 'idle_timeout.timeout_seconds'
+          Value: '60'
+        - Key: 'routing.http2.enabled'
+          Value: 'true'
+        - Key: 'access_logs.s3.enabled'
+          Value: 'false'
+        - Key: 'deletion_protection.enabled'
+          Value: 'false'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-alb'
+
+  # ========== TARGET GROUPS ==========
+
+  APITargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ProjectName}-api-tg'
+      Port: 3000
+      Protocol: 'HTTP'
+      ProtocolVersion: 'HTTP1'
+      VpcId: !ImportValue { "Fn::Sub": "${ProjectName}-VPC-ID" }
+      TargetType: 'ip'
+
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: '/health'
+      HealthCheckPort: 'traffic-port'
+      HealthCheckProtocol: 'HTTP'
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+
+      TargetGroupAttributes:
+        - Key: 'deregistration_delay.timeout_seconds'
+          Value: '30'
+        - Key: 'stickiness.enabled'
+          Value: 'false'
+        - Key: 'load_balancing.algorithm.type'
+          Value: 'round_robin'
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-api-tg'
+
+  # ========== ALB LISTENERS ==========
+
+  # HTTP → HTTPS 리다이렉트
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: 'HTTP'
+      DefaultActions:
+        - Type: 'redirect'
+          RedirectConfig:
+            Protocol: 'HTTPS'
+            Port: '443'
+            StatusCode: 'HTTP_301'
+
+  # HTTPS Listener (SSL 인증서 ARN 필요)
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: 'HTTPS'
+      Certificates:
+        - CertificateArn: 'arn:aws:acm:ap-east-2:156321659479:certificate/515cdf4b-abf7-4f36-bca6-3b94aca41b1e'
+      SslPolicy: 'ELBSecurityPolicy-TLS-1-2-2017-01'
+      DefaultActions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref APITargetGroup
+
+  # ========== ECS CLUSTER ==========
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-cluster'
+      CapacityProviders:
+        - 'FARGATE'
+        - 'FARGATE_SPOT'
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: 'FARGATE'
+          Weight: 1
+        - CapacityProvider: 'FARGATE_SPOT'
+          Weight: 0
+      ClusterSettings:
+        - Name: 'containerInsights'
+          Value: 'disabled'  # 비용 절감: 필요시 enabled
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-ecs-cluster'
+
+  # ========== IAM ROLES ==========
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ecs-task-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+      Policies:
+        - PolicyName: 'ECRAccessPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ecr:GetAuthorizationToken'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                Resource: '*'
+        - PolicyName: 'CloudWatchLogsPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+        - PolicyName: 'SecretsManagerReadPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}/*'
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ecs-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'S3AccessPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ProjectName}-*/*'
+        - PolicyName: 'SecretsManagerPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}/*'
+
+  # ========== CLOUDWATCH LOG GROUPS ==========
+
+  APILogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}/api'
+      RetentionInDays: 3  # 비용 절감
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-api-logs'
+
+  # ========== ECS TASK DEFINITION (초기 부트스트랩용) ==========
+  # 실제 TaskDefinition은 GitHub Actions에서 관리 (taskdef.json + deploy workflow)
+  # 이 정의는 ECS Service 생성에 필요한 최소 스펙만 포함
+
+  APITaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-api'
+      NetworkMode: 'awsvpc'
+      RequiresCompatibilities:
+        - 'FARGATE'
+      Cpu: '256'
+      Memory: '512'
+      RuntimePlatform:
+        CpuArchitecture: 'ARM64'
+        OperatingSystemFamily: 'LINUX'
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+
+      ContainerDefinitions:
+        - Name: 'seoul-moment-api'
+          Image: !Sub
+            - '${RepoURI}:latest'
+            - RepoURI: !ImportValue { "Fn::Sub": "${ProjectName}-ECR-API-URI" }
+          PortMappings:
+            - ContainerPort: 3000
+              Protocol: 'tcp'
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref APILogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: 'ecs'
+          Essential: true
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-api-task'
+
+  # ========== ECS SERVICES ==========
+
+  APIService:
+    Type: AWS::ECS::Service
+    DependsOn: HTTPSListener
+    Properties:
+      ServiceName: !Sub '${ProjectName}-api-service'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref APITaskDefinition
+      LaunchType: 'FARGATE'
+      DesiredCount: !Ref APIDesiredCount
+
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !ImportValue { "Fn::Sub": "${ProjectName}-ECSSG-ID" }
+          Subnets:
+            - !ImportValue { "Fn::Sub": "${ProjectName}-PublicSubnet1-ID" }
+            - !ImportValue { "Fn::Sub": "${ProjectName}-PublicSubnet2-ID" }
+          AssignPublicIp: 'ENABLED'
+
+      LoadBalancers:
+        - TargetGroupArn: !Ref APITargetGroup
+          ContainerName: 'seoul-moment-api'
+          ContainerPort: 3000
+
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+
+      HealthCheckGracePeriodSeconds: 60
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-api-service'
+
+Outputs:
+  # ALB
+  LoadBalancerDNSName:
+    Description: 'ALB DNS Name'
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub '${ProjectName}-ALB-DNSName'
+
+  LoadBalancerArn:
+    Description: 'ALB ARN'
+    Value: !Ref ApplicationLoadBalancer
+    Export:
+      Name: !Sub '${ProjectName}-ALB-ARN'
+
+  LoadBalancerHostedZoneID:
+    Description: 'ALB Hosted Zone ID (Route53 Alias 용)'
+    Value: !GetAtt ApplicationLoadBalancer.CanonicalHostedZoneID
+    Export:
+      Name: !Sub '${ProjectName}-ALB-HostedZoneID'
+
+  # Target Groups
+  APITargetGroupArn:
+    Description: 'API Target Group ARN'
+    Value: !Ref APITargetGroup
+    Export:
+      Name: !Sub '${ProjectName}-API-TargetGroup-ARN'
+
+  # ECS Cluster
+  ECSClusterName:
+    Description: 'ECS Cluster Name'
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub '${ProjectName}-ECS-Cluster-Name'
+
+  ECSClusterArn:
+    Description: 'ECS Cluster ARN'
+    Value: !GetAtt ECSCluster.Arn
+    Export:
+      Name: !Sub '${ProjectName}-ECS-Cluster-ARN'
+
+  # Services
+  APIServiceName:
+    Description: 'API Service Name'
+    Value: !GetAtt APIService.Name
+    Export:
+      Name: !Sub '${ProjectName}-API-Service-Name'
+
+  # Task Definitions
+  APITaskDefinitionArn:
+    Description: 'API Task Definition ARN (초기 부트스트랩용, GitHub Actions가 덮어씀)'
+    Value: !Ref APITaskDefinition
+    Export:
+      Name: !Sub '${ProjectName}-API-TaskDef-ARN'
+
+  # IAM Roles
+  ECSTaskExecutionRoleArn:
+    Description: 'ECS Task Execution Role ARN'
+    Value: !GetAtt ECSTaskExecutionRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-ECS-TaskExecution-RoleArn'
+
+  ECSTaskRoleArn:
+    Description: 'ECS Task Role ARN'
+    Value: !GetAtt ECSTaskRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-ECS-Task-RoleArn'

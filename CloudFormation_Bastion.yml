@@ -1,0 +1,38 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Cost-Optimized Bastion Host (Graviton2) for Seoul Moment'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'seoul-moment'
+  
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64'
+
+  KeyPairName:
+    Type: String
+    Default: 'seoul-moment-key'
+
+Resources:
+  BastionInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t4g.nano 
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyPairName
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          GroupSet:
+            - !ImportValue 
+              Fn::Sub: "${ProjectName}-BastionSG-ID"
+          SubnetId: !ImportValue 
+            Fn::Sub: "${ProjectName}-PublicSubnet1-ID"
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-bastion-low-cost'
+
+Outputs:
+  BastionPublicIP:
+    Value: !GetAtt BastionInstance.PublicIp

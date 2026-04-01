@@ -1,0 +1,627 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complete ECS Infrastructure with ALB, Target Groups, and ECS Services for Taipei Region'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'taipei-moment-dev'
+    Description: 'Project name prefix for all resources'
+  
+  VPCId:
+    Type: String
+    Description: 'VPC ID where resources will be deployed'
+    Default: 'vpc-xxxxxxxxx'
+  
+  PublicSubnet1Id:
+    Type: String
+    Description: 'Public Subnet 1 ID for ALB'
+    Default: 'subnet-xxxxxxxxx'
+  
+  PublicSubnet2Id:
+    Type: String
+    Description: 'Public Subnet 2 ID for ALB'
+    Default: 'subnet-xxxxxxxxx'
+  
+  PrivateSubnet1Id:
+    Type: String
+    Description: 'Private Subnet 1 ID for ECS'
+    Default: 'subnet-xxxxxxxxx'
+  
+  PrivateSubnet2Id:
+    Type: String
+    Description: 'Private Subnet 2 ID for ECS'
+    Default: 'subnet-xxxxxxxxx'
+  
+  ALBSecurityGroupId:
+    Type: String
+    Description: 'ALB Security Group ID'
+    Default: 'sg-xxxxxxxxx'
+  
+  ECSSecurityGroupId:
+    Type: String
+    Description: 'ECS Security Group ID'
+    Default: 'sg-xxxxxxxxx'
+  
+  ECRRepositoryAPIURI:
+    Type: String
+    Description: 'ECR Repository URI for API'
+    Default: 'ACCOUNT_ID.dkr.ecr.ap-northeast-3.amazonaws.com/taipei-moment-dev-api'
+  
+  ECRRepositoryBatchURI:
+    Type: String
+    Description: 'ECR Repository URI for Batch'
+    Default: 'ACCOUNT_ID.dkr.ecr.ap-northeast-3.amazonaws.com/taipei-moment-dev-batch'
+  
+  DatabaseEndpoint:
+    Type: String
+    Description: 'RDS Database Endpoint'
+    Default: 'taipei-moment-dev-db.xxxxx.ap-northeast-3.rds.amazonaws.com'
+  
+  CacheEndpoint:
+    Type: String
+    Description: 'ElastiCache Redis Endpoint'
+    Default: 'taipei-moment-redis.xxxxx.apn3.cache.amazonaws.com'
+
+Resources:
+  # ========== APPLICATION LOAD BALANCER ==========
+  
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-alb'
+      Type: 'application'
+      Scheme: 'internet-facing'
+      IpAddressType: 'ipv4'
+      Subnets:
+        - !Ref PublicSubnet1Id
+        - !Ref PublicSubnet2Id
+      SecurityGroups:
+        - !Ref ALBSecurityGroupId
+      LoadBalancerAttributes:
+        - Key: 'idle_timeout.timeout_seconds'
+          Value: '60'
+        - Key: 'routing.http2.enabled'
+          Value: 'true'
+        - Key: 'access_logs.s3.enabled'
+          Value: 'false'  # 필요시 S3 버킷 생성 후 활성화
+        - Key: 'deletion_protection.enabled'
+          Value: 'false'  # 개발 환경이므로 비활성화
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-alb'
+        - Key: Environment
+          Value: 'dev'
+
+  # ========== TARGET GROUPS ==========
+  
+  # API Target Group
+  APITargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ProjectName}-api-tg'
+      Port: 3000
+      Protocol: 'HTTP'
+      ProtocolVersion: 'HTTP1'
+      VpcId: !Ref VPCId
+      TargetType: 'ip'  # Fargate 사용 시 필수
+      
+      # Health Check Configuration
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: '/health'  # API 헬스체크 엔드포인트
+      HealthCheckPort: 'traffic-port'
+      HealthCheckProtocol: 'HTTP'
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      
+      # Target Group Attributes
+      TargetGroupAttributes:
+        - Key: 'deregistration_delay.timeout_seconds'
+          Value: '30'
+        - Key: 'stickiness.enabled'
+          Value: 'false'
+        - Key: 'load_balancing.algorithm.type'
+          Value: 'round_robin'
+      
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-api-tg'
+
+  # Batch Target Group (필요시)
+  BatchTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ProjectName}-batch-tg'
+      Port: 3000
+      Protocol: 'HTTP'
+      ProtocolVersion: 'HTTP1'
+      VpcId: !Ref VPCId
+      TargetType: 'ip'
+      
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: '/health'
+      HealthCheckPort: 'traffic-port'
+      HealthCheckProtocol: 'HTTP'
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      
+      TargetGroupAttributes:
+        - Key: 'deregistration_delay.timeout_seconds'
+          Value: '30'
+      
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-batch-tg'
+
+  # ========== ALB LISTENERS ==========
+  
+  # HTTP Listener (HTTPS로 리다이렉트)
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: 'HTTP'
+      DefaultActions:
+        - Type: 'redirect'
+          RedirectConfig:
+            Protocol: 'HTTPS'
+            Port: '443'
+            StatusCode: 'HTTP_301'
+
+  # HTTPS Listener (SSL 인증서 필요시 추가)
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: 'HTTPS'
+      # Certificates:  # SSL 인증서 ARN 필요시 추가
+      #   - CertificateArn: !Ref SSLCertificateArn
+      SslPolicy: 'ELBSecurityPolicy-TLS-1-2-2017-01'
+      DefaultActions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref APITargetGroup
+
+  # ========== LISTENER RULES ==========
+  
+  # API 경로 라우팅 규칙
+  APIListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HTTPSListener
+      Priority: 100
+      Conditions:
+        - Field: 'path-pattern'
+          Values:
+            - '/api/*'
+      Actions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref APITargetGroup
+
+  # Batch 경로 라우팅 규칙
+  BatchListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HTTPSListener
+      Priority: 200
+      Conditions:
+        - Field: 'path-pattern'
+          Values:
+            - '/batch/*'
+      Actions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref BatchTargetGroup
+
+  # ========== ECS CLUSTER ==========
+  
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-cluster'
+      CapacityProviders:
+        - 'FARGATE'
+        - 'FARGATE_SPOT'
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: 'FARGATE'
+          Weight: 1
+        - CapacityProvider: 'FARGATE_SPOT'
+          Weight: 0  # 개발 환경에서는 SPOT 비활성화
+      ClusterSettings:
+        - Name: 'containerInsights'
+          Value: 'enabled'  # Container Insights 활성화
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-ecs-cluster'
+
+  # ========== IAM ROLES ==========
+  
+  # ECS Task Execution Role
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ecs-task-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+      Policies:
+        - PolicyName: 'ECRAccessPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ecr:GetAuthorizationToken'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                Resource: '*'
+        - PolicyName: 'CloudWatchLogsPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+
+  # ECS Task Role (애플리케이션이 AWS 서비스에 접근할 때 사용)
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ecs-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'S3AccessPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                Resource: 
+                  - !Sub 'arn:aws:s3:::${ProjectName}-*/*'
+        - PolicyName: 'SecretsManagerPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: 
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}/*'
+
+  # ========== CLOUDWATCH LOG GROUPS ==========
+  
+  APILogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}/api'
+      RetentionInDays: 14
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-api-logs'
+
+  BatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}/batch'
+      RetentionInDays: 14
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-batch-logs'
+
+  # ========== ECS TASK DEFINITIONS ==========
+  
+  # API Task Definition
+  APITaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-api'
+      NetworkMode: 'awsvpc'
+      RequiresCompatibilities:
+        - 'FARGATE'
+      Cpu: '256'  # 0.25 vCPU
+      Memory: '512'  # 512 MB
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      
+      ContainerDefinitions:
+        - Name: 'api'
+          Image: !Sub '${ECRRepositoryAPIURI}:latest'
+          PortMappings:
+            - ContainerPort: 3000
+              Protocol: 'tcp'
+          
+          # Environment Variables
+          Environment:
+            - Name: 'NODE_ENV'
+              Value: 'development'
+            - Name: 'PORT'
+              Value: '3000'
+            - Name: 'DB_HOST'
+              Value: !Ref DatabaseEndpoint
+            - Name: 'DB_PORT'
+              Value: '5432'
+            - Name: 'DB_NAME'
+              Value: 'taipei_moment_dev_local'
+            - Name: 'REDIS_HOST'
+              Value: !Ref CacheEndpoint
+            - Name: 'REDIS_PORT'
+              Value: '6379'
+          
+          # Secrets (Secrets Manager 사용)
+          Secrets:
+            - Name: 'DB_USERNAME'
+              ValueFrom: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}/rds/credentials:username::'
+            - Name: 'DB_PASSWORD'
+              ValueFrom: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}/rds/credentials:password::'
+          
+          # Logging Configuration
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref APILogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: 'ecs'
+          
+          # Health Check
+          HealthCheck:
+            Command:
+              - 'CMD-SHELL'
+              - 'curl -f http://localhost:3000/health || exit 1'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          
+          Essential: true
+      
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-api-task'
+
+  # Batch Task Definition
+  BatchTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-batch'
+      NetworkMode: 'awsvpc'
+      RequiresCompatibilities:
+        - 'FARGATE'
+      Cpu: '256'
+      Memory: '512'
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      
+      ContainerDefinitions:
+        - Name: 'batch'
+          Image: !Sub '${ECRRepositoryBatchURI}:latest'
+          PortMappings:
+            - ContainerPort: 3000
+              Protocol: 'tcp'
+          
+          Environment:
+            - Name: 'NODE_ENV'
+              Value: 'development'
+            - Name: 'PORT'
+              Value: '3000'
+            - Name: 'DB_HOST'
+              Value: !Ref DatabaseEndpoint
+            - Name: 'DB_PORT'
+              Value: '5432'
+            - Name: 'DB_NAME'
+              Value: 'taipei_moment_dev_local'
+            - Name: 'REDIS_HOST'
+              Value: !Ref CacheEndpoint
+            - Name: 'REDIS_PORT'
+              Value: '6379'
+          
+          Secrets:
+            - Name: 'DB_USERNAME'
+              ValueFrom: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}/rds/credentials:username::'
+            - Name: 'DB_PASSWORD'
+              ValueFrom: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}/rds/credentials:password::'
+          
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref BatchLogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: 'ecs'
+          
+          HealthCheck:
+            Command:
+              - 'CMD-SHELL'
+              - 'curl -f http://localhost:3000/health || exit 1'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          
+          Essential: true
+      
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-batch-task'
+
+  # ========== ECS SERVICES ==========
+  
+  # API Service
+  APIService:
+    Type: AWS::ECS::Service
+    DependsOn: HTTPSListener
+    Properties:
+      ServiceName: !Sub '${ProjectName}-api-service'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref APITaskDefinition
+      LaunchType: 'FARGATE'
+      DesiredCount: 1
+      
+      # Network Configuration
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ECSSecurityGroupId
+          Subnets:
+            - !Ref PrivateSubnet1Id
+            - !Ref PrivateSubnet2Id
+          AssignPublicIp: 'DISABLED'
+      
+      # Load Balancer Configuration
+      LoadBalancers:
+        - TargetGroupArn: !Ref APITargetGroup
+          ContainerName: 'api'
+          ContainerPort: 3000
+      
+      # Service Discovery (선택사항)
+      # ServiceRegistries:
+      #   - RegistryArn: !GetAtt ServiceDiscoveryService.Arn
+      
+      # Deployment Configuration
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      
+      # Health Check Grace Period
+      HealthCheckGracePeriodSeconds: 60
+      
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-api-service'
+
+  # Batch Service
+  BatchService:
+    Type: AWS::ECS::Service
+    DependsOn: HTTPSListener
+    Properties:
+      ServiceName: !Sub '${ProjectName}-batch-service'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref BatchTaskDefinition
+      LaunchType: 'FARGATE'
+      DesiredCount: 1
+      
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ECSSecurityGroupId
+          Subnets:
+            - !Ref PrivateSubnet1Id
+            - !Ref PrivateSubnet2Id
+          AssignPublicIp: 'DISABLED'
+      
+      LoadBalancers:
+        - TargetGroupArn: !Ref BatchTargetGroup
+          ContainerName: 'batch'
+          ContainerPort: 3000
+      
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      
+      HealthCheckGracePeriodSeconds: 60
+      
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-batch-service'
+
+Outputs:
+  # ALB Outputs
+  LoadBalancerDNSName:
+    Description: 'Application Load Balancer DNS Name'
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub '${ProjectName}-ALB-DNSName'
+
+  LoadBalancerArn:
+    Description: 'Application Load Balancer ARN'
+    Value: !Ref ApplicationLoadBalancer
+    Export:
+      Name: !Sub '${ProjectName}-ALB-ARN'
+
+  LoadBalancerHostedZoneID:
+    Description: 'Application Load Balancer Hosted Zone ID'
+    Value: !GetAtt ApplicationLoadBalancer.CanonicalHostedZoneID
+    Export:
+      Name: !Sub '${ProjectName}-ALB-HostedZoneID'
+
+  # Target Group Outputs
+  APITargetGroupArn:
+    Description: 'API Target Group ARN'
+    Value: !Ref APITargetGroup
+    Export:
+      Name: !Sub '${ProjectName}-API-TargetGroup-ARN'
+
+  BatchTargetGroupArn:
+    Description: 'Batch Target Group ARN'
+    Value: !Ref BatchTargetGroup
+    Export:
+      Name: !Sub '${ProjectName}-Batch-TargetGroup-ARN'
+
+  # ECS Outputs
+  ECSClusterName:
+    Description: 'ECS Cluster Name'
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub '${ProjectName}-ECS-Cluster-Name'
+
+  ECSClusterArn:
+    Description: 'ECS Cluster ARN'
+    Value: !GetAtt ECSCluster.Arn
+    Export:
+      Name: !Sub '${ProjectName}-ECS-Cluster-ARN'
+
+  # Service Outputs
+  APIServiceName:
+    Description: 'API Service Name'
+    Value: !GetAtt APIService.Name
+    Export:
+      Name: !Sub '${ProjectName}-API-Service-Name'
+
+  BatchServiceName:
+    Description: 'Batch Service Name'
+    Value: !GetAtt BatchService.Name
+    Export:
+      Name: !Sub '${ProjectName}-Batch-Service-Name'
+
+  # Task Definition Outputs
+  APITaskDefinitionArn:
+    Description: 'API Task Definition ARN'
+    Value: !Ref APITaskDefinition
+    Export:
+      Name: !Sub '${ProjectName}-API-TaskDef-ARN'
+
+  BatchTaskDefinitionArn:
+    Description: 'Batch Task Definition ARN'
+    Value: !Ref BatchTaskDefinition
+    Export:
+      Name: !Sub '${ProjectName}-Batch-TaskDef-ARN'

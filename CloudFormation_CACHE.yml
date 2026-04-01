@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Cost-Optimized ElastiCache Redis for Production'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'seoul-moment'
+  
+  NodeType:
+    Type: String
+    Default: 'cache.t4g.micro'
+    AllowedValues:
+      - cache.t4g.micro
+      - cache.t3.micro
+  
+  NumCacheNodes:
+    Type: Number
+    Default: 1
+  
+  EnableBackups:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  
+  SnapshotRetentionLimit:
+    Type: Number
+    Default: 1
+
+Conditions:
+  EnableBackupsCondition: !Equals [!Ref EnableBackups, 'true']
+
+Resources:
+  CacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      CacheSubnetGroupName: !Sub '${ProjectName}-cache-subnet-group'
+      Description: 'Subnet group for ElastiCache Redis cluster'
+      SubnetIds:
+        - !ImportValue { "Fn::Sub": "${ProjectName}-PrivateSubnet1-ID" }
+        - !ImportValue { "Fn::Sub": "${ProjectName}-PrivateSubnet2-ID" }
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-cache-subnet-group' }
+
+  CacheParameterGroup:
+    Type: AWS::ElastiCache::ParameterGroup
+    Properties:
+      CacheParameterGroupFamily: 'redis7'
+      Description: 'Custom parameter group for Redis 7.x'
+      Properties:
+        maxmemory-policy: 'allkeys-lru'
+        timeout: '300'
+        tcp-keepalive: '60'
+        slowlog-log-slower-than: '10000'
+        slowlog-max-len: '128'
+
+  CacheLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/elasticache/${ProjectName}-redis'
+      RetentionInDays: 3
+
+  ElastiCacheReplicationGroup:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupId: !Sub '${ProjectName}-redis'
+      ReplicationGroupDescription: 'Redis replication group for caching'
+      Engine: 'redis'
+      EngineVersion: '7.1'
+      CacheNodeType: !Ref NodeType
+      NumCacheClusters: !Ref NumCacheNodes
+      CacheSubnetGroupName: !Ref CacheSubnetGroup
+      SecurityGroupIds:
+        - !ImportValue { "Fn::Sub": "${ProjectName}-CacheSG-ID" }
+      
+      AtRestEncryptionEnabled: true
+      TransitEncryptionEnabled: true
+      TransitEncryptionMode: 'preferred'
+      
+      AutomaticFailoverEnabled: false
+      MultiAZEnabled: false
+      
+      SnapshotRetentionLimit: !If 
+        - EnableBackupsCondition
+        - !Ref SnapshotRetentionLimit
+        - 0
+      PreferredMaintenanceWindow: 'sun:21:00-sun:22:00'
+      AutoMinorVersionUpgrade: true
+      CacheParameterGroupName: !Ref CacheParameterGroup
+      
+      LogDeliveryConfigurations:
+        - DestinationType: 'cloudwatch-logs'
+          DestinationDetails:
+            CloudWatchLogsDetails:
+              LogGroup: !Ref CacheLogGroup
+          LogFormat: 'json'
+          LogType: 'slow-log'
+
+  CPUUtilizationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-redis-cpu-high'
+      AlarmDescription: 'Redis CPU utilization is too high'
+      MetricName: 'CPUUtilization'
+      Namespace: 'AWS/ElastiCache'
+      Statistic: 'Average'
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: 'GreaterThanThreshold'
+      Dimensions:
+        - Name: 'CacheClusterId'
+          Value: !Sub '${ProjectName}-redis-001'
+      TreatMissingData: 'notBreaching'
+
+  DatabaseMemoryUsageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-redis-memory-high'
+      AlarmDescription: 'Redis memory utilization is too high'
+      MetricName: 'DatabaseMemoryUsagePercentage'
+      Namespace: 'AWS/ElastiCache'
+      Statistic: 'Average'
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: 'GreaterThanThreshold'
+      Dimensions:
+        - Name: 'CacheClusterId'
+          Value: !Sub '${ProjectName}-redis-001'
+      TreatMissingData: 'notBreaching'
+
+  CurrConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-redis-connections-high'
+      AlarmDescription: 'Redis connection count is too high'
+      MetricName: 'CurrConnections'
+      Namespace: 'AWS/ElastiCache'
+      Statistic: 'Average'
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 50
+      ComparisonOperator: 'GreaterThanThreshold'
+      Dimensions:
+        - Name: 'CacheClusterId'
+          Value: !Sub '${ProjectName}-redis-001'
+      TreatMissingData: 'notBreaching'
+
+Outputs:
+  ElastiCachePrimaryEndpoint:
+    Description: 'ElastiCache Primary Endpoint'
+    Value: !GetAtt ElastiCacheReplicationGroup.PrimaryEndPoint.Address
+    Export:
+      Name: !Sub '${ProjectName}-Cache-Primary-Endpoint'
+
+  ElastiCachePort:
+    Description: 'ElastiCache Port'
+    Value: !GetAtt ElastiCacheReplicationGroup.PrimaryEndPoint.Port
+    Export:
+      Name: !Sub '${ProjectName}-Cache-Port'
